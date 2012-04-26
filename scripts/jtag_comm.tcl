@@ -4,8 +4,6 @@
 # User API Functions
 # These should be generic and be the same no matter what the underlying FPGA is.
 # Use these to interact with the FPGA.
-# TODO: These are designed to assume a single FPGA. Re-design to handle multiple FPGAs, assigning
-# an arbitrary ID to each FPGA.
 
 
 # Import Xilinx ChipScope Engine Interface
@@ -42,7 +40,7 @@ proc fpga_init {} {
 
 	set jtag_handle [csejtag_session create "jtagWriteMessage"]
 
-	set fpga_deviceIndex [find_miner_fpga]
+	set fpga_deviceIndex [find_sha1_collider_fpga]
 
 	if {$fpga_deviceIndex == -1} {
 		return -1
@@ -60,7 +58,7 @@ proc fpga_cleanup {} {
 
 
 # Push new work to the FPGA
-proc push_work_to_fpga {workl} {
+proc push_work_to_fpga {target_hash fixed_data start_nonce} {
 	global jtag_handle
 	global fpga_deviceIndex
 	global CSEJTAG_LOCKED_ME
@@ -69,23 +67,15 @@ proc push_work_to_fpga {workl} {
 	global CSEJTAG_RUN_TEST_IDLE
 	global USER_NUM
 
-	array set work $workl
-
-	# [reverseHex $work(midstate)]
-	set midstate $work(midstate)
-	#set data [string range [reverseHex $work(data)] 104 127]
-	set data [string range $work(data) 128 151]
-	set hexdata "${midstate}${data}"
-
-	for {set i 0} {$i < 11} {incr i} {
-		set tx_data [string range $hexdata [expr {$i*8}] [expr {$i*8+7}]]
-		set tx_data [reverseHex $tx_data]
-		set addr [expr {$i + 1}]
-
-		#puts "TX_DATA: $tx_data"
-
-		write_fpga_register $addr "0x$tx_data"
-	}
+	write_fpga_register 0x01 [shift_hex $target_hash 4]
+	write_fpga_register 0x02 [shift_hex $target_hash 3]
+	write_fpga_register 0x03 [shift_hex $target_hash 2]
+	write_fpga_register 0x04 [shift_hex $target_hash 1]
+	write_fpga_register 0x05 [shift_hex $target_hash 0]
+	write_fpga_register 0x06 [expr {$fixed_data & 0xFFFFFFFF}]
+	write_fpga_register 0x07 [expr {($fixed_data >> 32) & 0xFFFFFFFF}]
+	write_fpga_register 0x08 [expr {$start_nonce & 0xFFFFFFFF}]
+	write_fpga_register 0x09 [expr {($start_nonce >> 32) & 0xFFFFFFFF}]
 }
 
 
@@ -94,8 +84,7 @@ proc clear_fpga_work {} {
 	# Currently does nothing, since there is no work queue
 }
 
-# Get a new result from the FPGA if one is available. Returns Golden Nonce (integer).
-# If no results are available, returns -1
+# Get a new result from the FPGA.
 proc get_result_from_fpga {} {
 	global jtag_handle
 	global fpga_deviceIndex
@@ -105,27 +94,7 @@ proc get_result_from_fpga {} {
 	global CSEJTAG_RUN_TEST_IDLE
 	global USER_NUM
 
-	set nonce [read_fpga_register 0xE]
-
-	if {$nonce == 0xFFFFFFFF} {
-		return -1
-	} else {
-		return $nonce
-	}
-}
-
-
-# Return the current nonce the FPGA is on.
-# This can be sampled to calculate how fast the FPGA is running.
-# Returns -1 if that information is not available.
-proc get_current_fpga_nonce {} {
-	return -1
-	#if { [instance_exists NONC] } {
-	#	set nonce [read_instance NONC]
-	#	return [expr 0x$nonce]
-	#} else {
-	#	return -1
-	#}
+	return [format %08X%08X [read_fpga_register 0xE] [read_fpga_register 0xD]]
 }
 
 
@@ -158,7 +127,7 @@ set USER_NUM "2"
 
 # Try to find an FPGA on the JTAG chain that has mining firmware loaded into it.
 # TODO: Return multiple FPGAs if more than one are found (that have mining firmware).
-proc find_miner_fpga {} {
+proc find_sha1_collider_fpga {} {
 	global jtag_handle
 	global CABLE_NAME
 	global CABLE_ARGS
@@ -188,7 +157,7 @@ proc find_miner_fpga {} {
 		set deviceCount [csejtag_tap get_device_count $jtag_handle]
 
 		for {set deviceIndex 0} {$deviceIndex < $deviceCount} {incr deviceIndex} {
-			if {[check_if_fpga_is_miner $jtag_handle $deviceIndex] == 1} {
+			if {[check_if_fpga_is_sha1collider $jtag_handle $deviceIndex] == 1} {
 				set validIndex $deviceIndex
 				break
 			}
@@ -217,8 +186,8 @@ proc find_miner_fpga {} {
 }
 
 
-# Check if the specified FPGA is loaded with miner firmware
-proc check_if_fpga_is_miner {jtag_handle deviceIndex} {
+# Check if the specified FPGA is loaded with the correct firmware
+proc check_if_fpga_is_sha1collider {jtag_handle deviceIndex} {
 	global fpga_name
 
 	set idcodeBuffer [csejtag_tap get_device_idcode $jtag_handle $deviceIndex]
@@ -356,6 +325,12 @@ proc write_fpga_register {address data} {
 	csejtag_target unlock $jtag_handle
 
 	return $rx_data
+}
+
+
+proc shift_hex {x r} {
+	set t [string range $x [expr {2+$r*8}] [expr {9+8*$r}]]
+	return "0x$t"
 }
 
 

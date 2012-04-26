@@ -1,41 +1,15 @@
 ##
 #
 # Copyright (c) 2011-2012 fpgaminer@bitcoin-mining.com
+# All rights reserved
 #
-#
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
-# 
 ##
 
 
-## TODO: Long polling.
-## TODO: --verbose option for debugging issues.
-## TODO: Handle multiple FPGAs at once.
-
-
-package require http
-#package require json
-package require base64
-
+package require sha1
 source utils.tcl
-source json_rpc.tcl
 source jtag_comm.tcl
 
-
-set total_accepted 0
-set total_rejected 0
 
 proc say_line {msg} {
 	set t [clock format [clock seconds] -format "%D %T"]
@@ -47,17 +21,47 @@ proc say_error {msg} {
 	puts stderr "\[$t\] $msg"
 }
 
-proc say_status {rate est_rate accepted rejected} {
-	set submitted [expr {$rejected + $accepted}]
+proc convert_bcd {x} {
+	return [string trimleft $x 0]
+}
 
-	if {$submitted == 0} {
-		set rej_rate [expr {$rejected * 100.0}]
-	} else {
-		set rej_rate [expr {$rejected * 100.0 / $submitted}]
+proc rand_digit {} {
+	return [expr {int(rand() * 9.9999999)}]
+}
+
+proc rand_digit_string {x y} {
+	set result ""
+
+	for { set i 1 } { $i <= $x } { incr i } {
+		set digit [rand_digit]
+		set result "${result}${digit}"
 	}
 
-	say_line [format "%.2f MH/s (~%.2f MH/s) \[Rej: %i/%i (%.2f%%)\]" $rate $est_rate $rejected $submitted $rej_rate]
+	return $result
 }
+
+proc pad_digit_string {x} {
+	set result ""
+	set len [string length $x]
+
+	for { set i 0 } { $i < $len } { incr i } {
+		set digit [string range $x $i $i]
+		set result "${result}0${digit}"
+	}
+
+	return $result
+}
+
+proc convert.hex.to.string hex {
+	foreach c [split $hex ""] {
+		if {![string is xdigit $c]} {
+			return "#invalid $hex"
+		}
+	}
+
+	binary format H* $hex
+}
+
 
 # Loop until a new share is found, or timeout seconds have passed.
 # Prints status updates every second.
@@ -122,84 +126,100 @@ proc wait_for_golden_ticket {timeout} {
 	return -1
 }
 
-proc submit_nonce {workl golden_nonce} {
-	global total_accepted
-	global total_rejected
-	global url
-	global userpass
-
-	array set work $workl
-
-	set share(data) $work(data)
-	set share(nonce) $golden_nonce
-
-	if {[submit_work $url $userpass [array get share]] == true} {
-		incr total_accepted
-	} else {
-		incr total_rejected
-	}
-}
-
-
-puts " --- FPGA Mining Tcl Script --- \n\n"
+puts " --- FPGA SHA1 Collider Tcl Script --- \n\n"
 
 
 puts "Looking for and preparing FPGAs...\n"
 if {[fpga_init] == -1} {
-	puts stderr "No mining FPGAs found."
+	puts stderr "No supported FPGAs found."
 	puts "\n\n --- Shutting Down --- \n\n"
 	exit
 }
 
 set fpga_name [get_fpga_name]
-puts "Mining FPGA Found: $fpga_name\n\n"
+puts "FPGA Found: $fpga_name\n\n"
 
-if {[get_current_fpga_nonce] == -1} {
-	puts "WARNING: The FPGA's mining firmware does not report a hashrate. Status messages will show 0.00 MH/s, but the FPGA should still be running. Check the estimated rate for approximate hashing rate after shares have been submitted.\n\n"
+
+set RANDOM_WORK 0
+source config.tcl
+
+if {$RANDOM_WORK} {
+	set start_nonce 0x0000000000000000
+	set secret [rand_digit_string 11 1]
+	set secret "0000$secret"
+	set fixed_data [rand_digit_string 14 0]
+
+	puts "Secret Nonce is: $secret"
+
+	set secret [pad_digit_string $secret]
+	set secretb [convert.hex.to.string $secret]
+	set fixed_datab [convert.hex.to.string $fixed_data]
+	set msg "$secretb\x00$fixed_datab\x00"
+	set target_hash [sha1::sha1 $msg]
+	
+	set target_hash "0x$target_hash"
+	set fixed_data "0x$fixed_data"
 }
 
-source config.tcl
-set userpass [::base64::encode $userpass]
-set global_start_time [clock seconds]
+
+puts "Searching for...\nSHA1 (Unknown Nonce + 0x00 + $fixed_data + 0x00) == $target_hash\nStarting Nonce: $start_nonce\n"
 
 
-set work -1
+push_work_to_fpga $target_hash $fixed_data $start_nonce
+
+set begin_time [clock clicks -milliseconds]
+
+after 500
+
 
 while {1} {
-	# Get new work
-	set newwork [get_work $url $userpass]
-	#set newwork [list midstate 90f741afb3ab06f1a582c5c85ee7a561912b25a7cd09c060a89b3c2a73a48e22 data 000000014cc2c57c7905fd399965282c87fe259e7da366e035dc087a0000141f000000006427b6492f2b052578fb4bc23655ca4e8b9e2b9b69c88041b2ac8c771571d1be4de695931a2694217a33330e000000800000000000000000000000000000000000000000000000000000000000000000000000000000000080020000]
-	#set newwork [list midstate dff4af507630991f92fdd78371c1d811f3f45bfcfc808ede72aa751d8e1afa27 data 00000001d2ab3e86ad0bcaa49de46a4e5b2d5963ee2d339af32de8b300000a6e000000001c3337bacce38e66884e223dc10ef5bbf1ad0b409629952e5c4dee03072abb104eff2f3e1a0e76ba00000000000000800000000000000000000000000000000000000000000000000000000000000000000000000000000080020000]
+	set golden_nonce [get_result_from_fpga]
+	set now [clock clicks -milliseconds]
+	set nonce [convert_bcd $golden_nonce]
 
-	if {$newwork != -1} {
-		# Check to see if the FPGA completed any results while we were getting new work.
-		set golden_nonce [get_result_from_fpga]
-
-		if {$golden_nonce != -1 && [array exists work]} {
-			#puts "Golden Nonce: $golden_nonce"
-			submit_nonce [array get work] $golden_nonce
-		}
-
-		push_work_to_fpga $newwork
-		unset work
-		array set work $newwork
-	}
-
-	# Even if we couldn't get new work above, we should still loop looking for results,
-	# because the FPGA will (currently) continue to mine.
-	# TODO: In the future the FPGA will go idle once it completes its work.
-	
-	# We wait 20 seconds, because after 20 seconds we should go get new work from the pool.
-	# Getting new work every 20 seconds helps prevent stale shares.
-	# TODO: Implement Long Polling ... :P
-	set golden_nonce [wait_for_golden_ticket 20]
-
-	if {$golden_nonce == -1 || ![array exists work]} {
+	# Sometimes incorrect nonces are returned
+	set check [regexp {^[1-9][0-9]*$} $nonce]
+	if {! $check} {
+		#puts $nonce
 		continue
 	}
 
-	#puts "Golden Nonce: $golden_nonce"
-	submit_nonce [array get work] $golden_nonce
+	if {[string range $golden_nonce 0 0] == 1} {
+		# Double check
+		set golden_nonce2 [get_result_from_fpga]
+
+		if {$golden_nonce2 != $golden_nonce} {
+			continue
+		}
+
+		puts "Collision Found!\n"
+		puts "-----------------"
+		#puts [string range $golden_nonce 1 15]
+		set nonce [expr {$nonce - 1000000000000000 - 168}]
+		puts [format "%015lu" $nonce]
+		puts "-----------------"
+		puts "\n\n"
+		break
+	}
+
+	set golden_nonce [convert_bcd $golden_nonce]
+
+	set dt [expr {$now - $begin_time}]
+	#puts "$golden_nonce $dt"
+	set rate [expr {$golden_nonce / ($dt * 1000.0)}]
+	set progress [expr {$golden_nonce * 100.0 / 999999999999999}]
+	set nonces_remaining [expr {999999999999999 - $golden_nonce}]
+	set time_remaining [expr {int($nonces_remaining * 0.5 / (1000000 * $rate))}]
+	set days [expr {int($time_remaining / 86400)}]
+	set time_remaining [expr {$time_remaining - ($days * 86400)}]
+	set hours [expr {int($time_remaining / 3600)}]
+	set time_remaining [expr {$time_remaining - ($hours * 3600)}]
+	set minutes [expr {int($time_remaining / 60)}]
+	#puts $nonces_remaining
+
+	say_line [format "%.2f%% (%.2f MH/s) \[%s\] ~%d Days %d Hours %d Minutes Remaining" $progress $rate $golden_nonce $days $hours $minutes]
+
+	after 2000
 }
 
 

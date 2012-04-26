@@ -34,11 +34,19 @@ module sha1_collision_top (
 	// Comm
 	reg [59:0] golden_nonce = 0;
 	reg golden_nonce_found = 1'b0;
+	wire comm_new_work;
+	wire [55:0] comm_fixed_data;
+	wire [159:0] comm_target_hash;
+	wire [59:0] comm_start_nonce;
 
 	jtag_comm comm_blk (
 		.rx_hash_clk (hash_clk),
 		.rx_golden_nonce_found (golden_nonce_found),
-		.rx_golden_nonce (golden_nonce)
+		.rx_golden_nonce (golden_nonce),
+		.tx_new_work (comm_new_work),
+		.tx_fixed_data (comm_fixed_data),
+		.tx_target_hash (comm_target_hash),
+		.tx_start_nonce (comm_start_nonce)
 	);
 
 
@@ -48,8 +56,8 @@ module sha1_collision_top (
 
 	bcd_counter # (.STEP(2)) counter_blk (
 		.clk (hash_clk),
-		.rst (golden_nonce_found),
-		.rx_reset_value (0),
+		.rst (golden_nonce_found | comm_new_work),
+		.rx_reset_value (comm_start_nonce),
 		.tx_nonce (nonce)
 	);
 
@@ -69,17 +77,21 @@ module sha1_collision_top (
 	
 	always @ (posedge hash_clk)
 	begin
-		//expanded_message <= {32'd192, 32'h0, 224'h0, 32'h80000000, fixed_data[`IDX(2)], fixed_data[`IDX(1)], fixed_data[`IDX(0)], 8'h00, fixed_data[`IDX(6)], fixed_data[`IDX(5)], fixed_data[`IDX(4)], fixed_data[`IDX(3)], nonce[`IDX(2)], nonce[`IDX(1)], nonce[`IDX(0)], 8'h00, nonce[`IDX(6)], nonce[`IDX(5)], nonce[`IDX(4)], nonce[`IDX(3)], nonce[`IDX(10)], nonce[`IDX(9)], nonce[`IDX(8)], nonce[`IDX(7)], nonce[`IDX(14)], nonce[`IDX(13)], nonce[`IDX(12)], nonce[`IDX(11)]};
+		fixed_data <= comm_fixed_data;
+		target_hash <= comm_target_hash;
 
-		// Constantly updating the golden nonce until we've a real
-		// golden nonce allows the external controller to monitor
-		// progress.
+		// Constantly updating the golden nonce until we've found
+		// a real golden nonce allows the external controller to
+		// monitor progress.
 		if (!golden_nonce_found)
 			golden_nonce <= nonce;
 
 		// Collision found?
 		if (hash0 == target_hash || hash1 == target_hash)
 			golden_nonce_found <= 1'b1;
+
+		if (comm_new_work)
+			golden_nonce_found <= 1'b0;
 	end
 	
 endmodule

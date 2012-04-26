@@ -9,8 +9,20 @@
 module jtag_comm (
 	input rx_hash_clk,
 	input rx_golden_nonce_found,
-	input [59:0] rx_golden_nonce
+	input [59:0] rx_golden_nonce,
+	output reg tx_new_work,
+	output reg [55:0] tx_fixed_data = 56'd0,
+	output reg [159:0] tx_target_hash = 160'd0,
+	output reg [59:0] tx_start_nonce = 60'd0
 );
+
+	// Configuration data
+	reg [56+160+60-1:0] current_job = 276'd0;
+	reg [55:0] fixed_data = 56'd0;
+	reg [159:0] target_hash = 160'd0;
+	reg [59:0] start_nonce = 60'd0;
+	reg new_work_flag = 1'b0;
+
 
 	// JTAG
 	wire jt_capture, jt_drck, jt_reset, jt_sel, jt_shift, jt_tck, jt_tdi, jt_update;
@@ -35,6 +47,7 @@ module jtag_comm (
 	reg [37:0] dr;
 	reg checksum;
 	wire checksum_valid = ~checksum;
+	wire jtag_we = dr[36];
 	wire [3:0] jtag_addr = dr[35:32];
 
 	// Golden Nonce FIFO: from rx_hash_clk to TCK
@@ -65,20 +78,20 @@ module jtag_comm (
 
 			case (addr)
 				4'h0: dr[31:0] <= 32'h01000100;
-				4'h1: dr[31:0] <= golden_nonce[31:0];
-				4'h2: dr[31:0] <= golden_nonce[60:32];
-				4'h3: dr[31:0] <= 32'hFFFFFFFF;
-				4'h4: dr[31:0] <= 32'hFFFFFFFF;
-				4'h5: dr[31:0] <= 32'hFFFFFFFF;
-				4'h6: dr[31:0] <= 32'hFFFFFFFF;
-				4'h7: dr[31:0] <= 32'hFFFFFFFF;
-				4'h8: dr[31:0] <= 32'hFFFFFFFF;
-				4'h9: dr[31:0] <= 32'hFFFFFFFF;
+				4'h1: dr[31:0] <= target_hash[31:0];
+				4'h2: dr[31:0] <= target_hash[63:32];
+				4'h3: dr[31:0] <= target_hash[95:64];
+				4'h4: dr[31:0] <= target_hash[127:96];
+				4'h5: dr[31:0] <= target_hash[159:128];
+				4'h6: dr[31:0] <= fixed_data[31:0];
+				4'h7: dr[31:0] <= fixed_data[55:32];
+				4'h8: dr[31:0] <= start_nonce[31:0];
+				4'h9: dr[31:0] <= start_nonce[59:32];
 				4'hA: dr[31:0] <= 32'hFFFFFFFF;
 				4'hB: dr[31:0] <= 32'hFFFFFFFF;
 				4'hC: dr[31:0] <= 32'h55555555;
-				4'hD: dr[31:0] <= 32'hFFFFFFFF;
-				4'hE: dr[31:0] <= 32'hFFFFFFFF;
+				4'hD: dr[31:0] <= golden_nonce[31:0];
+				4'hE: dr[31:0] <= golden_nonce[60:32];
 				4'hF: dr[31:0] <= 32'hFFFFFFFF;
 			endcase
 		end
@@ -90,7 +103,44 @@ module jtag_comm (
 		else if (jt_update & checksum_valid)
 		begin
 			addr <= jtag_addr;
+
+			if (jtag_we)
+			begin
+				case (jtag_addr)
+					4'h1: target_hash[31:0] <= dr[31:0];
+					4'h2: target_hash[63:32] <= dr[31:0];
+					4'h3: target_hash[95:64] <= dr[31:0];
+					4'h4: target_hash[127:96] <= dr[31:0];
+					4'h5: target_hash[159:128] <= dr[31:0];
+					4'h6: fixed_data[31:0] <= dr[31:0];
+					4'h7: fixed_data[55:32] <= dr[23:0];
+					4'h8: start_nonce[31:0] <= dr[31:0];
+					4'h9: start_nonce[59:32] <= dr[27:0];
+				endcase
+			end
+
+			if (jtag_we && jtag_addr == 4'h9)
+			begin
+				current_job <= {dr[27:0], start_nonce[31:0], fixed_data, target_hash};
+				new_work_flag <= ~new_work_flag;
+			end
 		end
+	end
+
+
+	// Output Metastability Protection
+	// This should be sufficient, because work rarely changes and comes
+	// from a slower clock domain (rx_hash_clk is assumed to be fast).
+	reg [275:0] tx_buffer = 276'd0;
+	reg [2:0] tx_work_flag = 3'b0;
+
+	always @ (posedge rx_hash_clk)
+	begin
+		tx_buffer <= current_job;
+		{tx_start_nonce, tx_fixed_data, tx_target_hash} <= tx_buffer;
+
+		tx_work_flag <= {tx_work_flag[1:0], new_work_flag};
+		tx_new_work <= tx_work_flag[2] ^ tx_work_flag[1];
 	end
 
 
